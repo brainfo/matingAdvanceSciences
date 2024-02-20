@@ -1,0 +1,508 @@
+---
+title: "DEG"
+author: "Hong Jiang"
+date: "31/01/2022"
+output:
+   html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(warning=FALSE, message=FALSE) 
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+```{r library, include=F}
+#.libPaths(c("/mnt/data/hong/anaconda3/lib/R/library"))
+library(DESeq2)
+library(stringr)
+library(dplyr)
+library(plotly)
+library(reticulate)
+library(tidyr)
+library(ComplexHeatmap)
+library(ggplot2)
+library(EnhancedVolcano)
+# use_python('/mnt/data/hong/anaconda3/bin/python')
+# options(reticulate.conda_binary = '/mnt/data/hong/anaconda3/bin/conda')
+# use_condaenv('base')
+#knitr::knit_engines$set(python = reticulate::eng_python)
+```
+## make dataset
+```{r dataset}
+data = read.table(file = '../mouse_pgc/count.txt', sep = '\t', quote = "", header = T)
+cell.info = read.table(file = '../mouse_pgc/cell_info.txt', sep = '\t', quote = "", header = T)
+mapdf <- data.frame(old=cell.info$BC,new=cell.info$sample)
+sample.names <- mapdf$new[match(colnames(data),mapdf$old)]
+sample.names[1] <- 'X'
+colnames(data) <- sample.names
+data_distinct = data %>% distinct(X, .keep_all = T)
+data_pgc = data_distinct[,grep('PGC', colnames(data_distinct))]
+rownames(data_pgc) = data_distinct$X
+
+sample.pgc.e10 = data.frame(condition = c('CNT', 'FLU', 'FLU', 'DHT', 'FLU'), gender = rep('not know', 5), sample = colnames(data_pgc), row.names = colnames(data_pgc), time= rep('10.5', 5), tissue=rep('PGC', 5))
+
+data = read.table(file = 'counts_placentanew.txt', sep = '\t', quote = "", header = T)
+data_distinct = data %>% distinct(gene_0me, .keep_all = T)
+## duplicate gene names, why?
+rownames(data_distinct) = data_distinct$gene_0me
+data_distinct$gene_0me = NULL
+sample.index = colnames(data_distinct)
+condition = factor(substr(sample.index, start = 1, stop = 3))
+time = factor(str_extract(sample.index, '(\\d+\\.\\d+)'))
+gender = factor(substr(sample.index, 4, 4))
+tissue = factor(rep('placenta', length(sample.index)))
+samples = data.frame(condition = condition, time = time, gender = gender, sample = sample.index, row.names = sample.index, tissue=tissue)
+
+data.pgc = read.table(file = '../mouse_pgc/PGCcountshaojiang.txt', sep = '\t', quote = "", header = T)
+data_distinct.pgc = data.pgc %>% distinct(gene_0me, .keep_all = T)
+## duplicate gene names, why?
+rownames(data_distinct.pgc) = data_distinct.pgc$gene_0me
+data_distinct.pgc$gene_0me = NULL
+
+sample.index.pgc = colnames(data_distinct.pgc)
+condition.pgc = factor(substr(sample.index.pgc, start = 7, stop = 9))
+time.pgc = factor(str_extract(sample.index.pgc, '(\\d+\\.\\d+)'))
+gender.pgc = factor(substr(sample.index.pgc, 10, 10))
+tissue.pgc = factor(rep('pgc', length(sample.index.pgc)))
+samples.pgc = data.frame(condition = condition.pgc, gender = gender.pgc, sample = sample.index.pgc, row.names = sample.index.pgc, time= time.pgc, tissue=tissue.pgc)
+
+data.all = merge(data_distinct, data_distinct.pgc, by=0)
+rownames(data.all) = data.all$Row.names
+data.all$Row.names = NULL
+samples.all = rbind(samples, samples.pgc)
+
+data.p10 = merge(data.all, data_pgc, by=0)
+rownames(data.p10) = data.p10$Row.names
+data.p10$Row.names = NULL
+samples.p10 = rbind(samples.all, sample.pgc.e10)
+
+## since no DHT at 13.5
+data_noDHT = data_distinct[,condition!='DHT']
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = as.matrix(data_distinct),
+                              colData = samples,
+                              design = ~ condition)
+dds.pgc <- DESeqDataSetFromMatrix(countData = as.matrix(data_distinct.pgc),
+                              colData = samples.pgc,
+                              design = ~ condition)
+#colnames(dds.pgc) <- colData(dds.pgc)$condition
+dds.nooutlier <- dds[, !grepl("FLUM2_13.5|FLUF2_13.5|CNTF2_10.5|DHTF1_10.5", colnames(dds))]
+dds.e10 <- dds.nooutlier[, dds.nooutlier$time!=13.5]
+dds.e13 <- dds.nooutlier[, dds.nooutlier$time==13.5]
+dds.female <- dds.e10[, dds.e10$gender=='F']
+dds.male <- dds.e10[, dds.e10$gender=='M']
+# ddsColl = collapseReplicates(dds, bio)
+dds.pgc.nooutlier <- dds.pgc[, !grepl('E13.5_FLUM3|E13.5_FLUF2|E13.5_FLUM2',colnames(dds.pgc))]
+samples.pgc.nooutlier <- dplyr::filter(samples.pgc, !(sample %in% c('E13.5_FLUM3', 'E13.5_FLUF2', 'E13.5_FLUM2')))
+sample.pgc.e10$detected <- detected.pgc
+mean.pgc.detected <- aggregate(detected~condition+time+gender, samples.pgc.nooutlier, mean)
+sum(data_distinct$FLUF2_13.5>0)
+```
+## QC
+```{r qc, fig.width=2, fig.height=6}
+detected = colSums(counts(dds.nooutlier) > 0)
+boxplot(detected , width=0.01)
+detected
+```
+## preprocess
+### filtering
+```{r filter}
+sprintf("original gene number: %s; original sample number: %s", nrow(dds.nooutlier), ncol(dds.nooutlier))
+keep <- rowSums(counts(dds.nooutlier) > 0) >= 6
+dds.filter <- dds.nooutlier[keep, ]
+colnames(dds.filter) <- colData(dds.filter)$condition
+## remove mt genes
+dds.filter.nomt <- dds.filter[!grepl('^mt-',rownames(dds.filter)),]
+colSums(assay(dds.filter.nomt))/colSums(assay(dds.filter))
+
+sprintf('original gene number: %s; original sample number: %s', nrow(dds.e13), ncol(dds.e13))
+keep <- rowSums(counts(dds.e13)>0) >= 8
+dds.e13.filter <- dds.e13[keep,]
+## remove mt genes
+dds.e13.filter <- dds.e13.filter[!grepl('^mt-',rownames(dds.e13.filter)),]
+
+sprintf('summed reads over 35 samples: %s', nrow(dds.filter.female))
+#dds.filter$condition <- relevel(dds.filter$condition, ref = "FLU")
+sprintf('original gene number: %s; original sample number: %s', nrow(dds.male), ncol(dds.male))
+keep <- rowSums(counts(dds.male)>0) >= 3
+dds.filter.male <- dds.male[keep,]
+sprintf('summed reads over 35 samples: %s', nrow(dds.filter.male))
+```
+### technical replicates
+```{r tech}
+log_ <- log1p(assay(dds.filter.nomt) * 1000000 / colSums(assay(dds.filter.nomt)))
+sampleCors <- cor(log_, method = 'spearman')
+
+embryo_info <- read.csv('samples/sample_info.txt', sep='\t')
+embryo_info = mutate(embryo_info, Sex=substr(Samples, 4, 4))
+rownames(embryo_info) <- embryo_info$Samples
+## subset embryo_info with the same samples as dds
+embryo_info = embryo_info[colData(dds.filter.nomt)$sample,]
+column_ha = HeatmapAnnotation(time = colData(dds.filter.nomt)$time, condition = colData(dds.filter.nomt)$condition, sex = colData(dds.filter.nomt)$gender)
+row_ha = rowAnnotation(placenta = embryo_info$Placenta.diameter, CRL = embryo_info$CRL, embryo = embryo_info$Embryo)
+library(circlize)
+col_fun = colorRamp2(c(0.6, 0.8, 1), c("blue", "white", "orange"))
+pdf('logexp_corr.pdf')
+Heatmap(sampleCors, name = "Corr", top_annotation = column_ha, right_annotation = row_ha, cluster_rows = T, cluster_columns = T, col=col_fun)
+dev.off()
+#log_dds_e10 <- log1p(fpm(dds.e10.filter))
+log_dds_e10_pca <- prcomp(t(log_))
+log_dds_e10_pca.proportionvariances <- ((log_dds_e10_pca$sdev^2) / (sum(log_dds_e10_pca$sdev^2)))*100
+color = factor(dds.e10$condition, levels=c('CNT', 'DHT', 'FLU'), labels=c('black', '#00B3B3', '#9DFFFF'))
+symbol = as.numeric(factor(dds.e10$gender, levels=c('M', 'F'), labels=c(21, 22)))
+require(scatterplot3d)
+pdf('figures/pca3d_E10_placenta.pdf')
+par(mar=c(4,4,4,4), cex=1.0, cex.main=0.8, cex.axis=0.8)
+
+scatterplot3d(log_dds_e10_pca$x[,1:3], angle=-40, main="", color=color, pch=symbol, xlab=paste("PC1, ", round(log_dds_e10_pca.proportionvariances[1], 2), "%"), ylab=paste("PC2, ", round(log_dds_e10_pca.proportionvariances[2], 2), "%"), zlab=paste("PC3, ", round(log_dds_e10_pca.proportionvariances[3], 2), "%"), grid=FALSE, box=FALSE, ylim = c(-40, 60), lwd=.5)
+source('http://www.sthda.com/sthda/RDoc/functions/addgrids3d.r')
+addgrids3d(log_dds_e10_pca$x[,1:3], grid = c("xy", "xz", "yz"))
+dev.off()
+# 
+# source('http://www.sthda.com/sthda/RDoc/functions/addgrids3d.r')
+# addgrids3d(log_dds_e10_pca$x[,1:3], grid = c("xy", "xz", "yz"))
+
+log_dds_e10_pca <- prcomp(log_, scale = F,
+                center = T, retx = T)
+ 
+# Compute variance
+log_dds_pca.var <- log_dds_e10_pca$sdev ^ 2
+# Proportion of variance for a scree plot
+propve <- log_dds_pca.var / sum(log_dds_pca.var)
+propve_2plot <- log_dds_e10_pca.proportionvariances[1:2]
+propve_2plot
+
+pca_2plot <- as.data.frame(log_dds_e10_pca$x[,1:2])
+pca_2plot$condition <- c(dds.e10$condition)
+pca_2plot$gender <- dds.e10$gender
+
+write.csv(pca_2plot, 
+          file="PCA/E10_placenta_PCA.tsv")
+
+vsd <- vst(dds.filter, blind=FALSE)
+vsd_pgc <- vsd[, c(sample.index.pgc, colnames(data_pgc))]
+
+
+pca = plotPCA(log_dds, intgroup=c('condition','time', 'gender'), returnData=T)
+
+sampleDists <- cor(assay(vsd), method = 'pearson')
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- sample.index
+colnames(sampleDistMatrix) <- NULL
+breaksList = seq(0.9, 1, by = 0.001)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+library(pheatmap)
+pheatmap(sampleDistMatrix,
+         col=colors,
+         main = 'Euclidean Distance of rlog normalized counts')
+?prcomp
+```
+### python plots
+```{python detected}
+import seaborn as sns
+import pandas as pd
+import matplotlib.pyplot as plt
+sns.set(rc={'figure.figsize':(8,8)})
+custom_params = {"axes.spines.right": False, "axes.spines.top": False}
+sns.set_theme(style="ticks", rc=custom_params)
+from matplotlib import rcParams
+rcParams['font.family'] = 'sans-serif'
+rcParams['font.sans-serif'] = ['DejaVu Sans']
+## boxplot
+fig, ax = plt.subplots()
+ax = sns.boxplot(y=r.detected, width=0.1)
+ax.set(xlabel='Placenta', ylabel='Number of genes detected')
+#plt.tight_layout() 
+plt.savefig('figures/detected_placenta.pdf', bbox_inches='tight')
+#pca_data_float = r.pca_pgc.astype({'time':'float'})
+#r.pca_pgc.time.astype(float)
+#pca = sns.scatterplot(data=r.pca_pgc, x='PC1', y='PC2', hue='condition', style='tissue', size='time').get_figure()
+
+fig, ax = plt.subplots()
+ax = sns.jointplot(data=r.pca_2plot, x='PC1', y='PC2', hue='condition', legend='brief', palette=['white', '#00B3B3', '#9DFFFF'], linewidth=.2, edgecolor="black", ylim=[-100,50], xlim=[-150,150], kind="kde")
+# ax = sns.scatterplot(data=r.pca_2plot, x='PC1', y='PC2', hue='condition', style='gender', legend='brief', s=200, palette=['white', '#00B3B3', '#9DFFFF'], linewidth=.2, edgecolor="black")
+plt.xlabel('PC1 31.6%')
+plt.ylabel('PC2 15.2%')
+plt.legend(bbox_to_anchor=(1.3, 1), loc=2, borderaxespad=0.)
+plt.savefig('figures/E10_placenta_pca_distrikde.pdf', dpi=900, bbox_inches='tight')
+# ax.set_xlim(-25,45)
+
+plt.savefig('figures/PCA_placenta_nooutlier.pdf', bbox_inches='tight')
+#plt.show()
+```
+## run DESeq2
+```{r DESeq, message=FALSE}
+dds.e10.filter <- DESeq(dds.e10.filter)
+dds.filter.male <- DESeq(dds.filter.male)
+#res <- results(dds)
+```
+## postprocess
+### effect size shrinkage
+```{r lfcsgrink, message=FALSE, fig.width=8, fig.height=6}
+resultsNames(dds.filter)
+resdht = lfcShrink(dds.e10.filter, coef="condition_DHT_vs_CNT", type='apeglm')
+pdf('DHT_E10_vocano.pdf')
+EnhancedVolcano(resdht,
+    lab = paste0("italic('", rownames(resdht), "')"),
+    x = 'log2FoldChange',
+    drawConnectors = TRUE,
+    y = 'padj',
+    parseLabels = TRUE)+ theme_classic()
+dev.off()
+resdht = resdht[complete.cases(resdht), ]
+resdht_sig = as.data.frame(resdht)[resdht$padj<0.05&abs(resdht$log2FoldChange)>1,]
+write.csv(resdht_sig[complete.cases(resdht_sig), ], 
+          file="DEGs/DHT_vs_FLU_female_DEGs.csv")
+resFLU <- lfcShrink(dds.filter, coef="condition_FLU_vs_CNT", type='apeglm')
+resFLU_female = resFLU_female[complete.cases(resFLU_female), ]
+resFLU_sig_female = as.data.frame(resFLU)[resFLU$padj<0.05,]
+write.csv(as.data.frame(resFLU), 
+          file="DEGs/FLU_vs_CNT_0DEGs.csv")
+
+resultsNames(dds.filter.male)
+resdht = lfcShrink(dds.filter.male, coef="condition_DHT_vs_CNT", type='apeglm')
+resdht = resdht[complete.cases(resdht), ]
+
+merge_df <- merge(as.data.frame(resdht_female), as.data.frame(resdht), by=0)
+merge_df_sig = merge_df %>% filter((abs(log2FoldChange.x)>1 & padj.x<0.05)|(abs(log2FoldChange.y)>1 & padj.y<0.05))
+
+resdht_sig = as.data.frame(resdht_female)[resdht$padj<0.05&abs(resdht$log2FoldChange)>1,]
+write.csv(resdht_sig[complete.cases(resdht_sig), ], 
+          file="DEGs/DHT_vs_FLU_male_DEGs.csv")
+resFLU <- lfcShrink(dds.filter.male, coef="condition_FLU_vs_CNT", type='apeglm')
+resFLU = resFLU[complete.cases(resFLU), ]
+resFLU_sig = as.data.frame(resFLU)[resFLU$padj<0.05,]
+write.csv(as.data.frame(resFLU), 
+          file="DEGs/FLU_vs_CNT_0DEGs.csv")
+
+resM = lfcShrink(dds, coef="gender_M_vs_F", type='apeglm')
+resM = resM[complete.cases(resM), ]
+write.csv(as.data.frame(resM), 
+          file="M_0DEGs.csv")
+resDHTM = lfcShrink(dds, coef="conditionDHT.genderM", type='apeglm')
+resDHTM = resDHTM[complete.cases(resDHTM), ]
+write.csv(as.data.frame(resDHTM), 
+          file="DHTM_0DEGs.csv")
+resFLUM = lfcShrink(dds, coef="conditionFLU.genderM", type='apeglm')
+resFLUM = resFLUM[complete.cases(resFLUM), ]
+write.csv(as.data.frame(resFLUM), 
+          file="FLUM_0DEGs.csv")
+restime = lfcShrink(dds.filter, coef="time_13.5_vs_10.5", type='apeglm')
+restime = restime[complete.cases(restime), ]
+# no DEGs in Flu vs Cnt
+```
+### vocano
+```{r vocano, message=FALSE}
+restime$logpadj = -log(restime$padj)
+restime$cutoff = ifelse(restime$padj<0.05 & abs(restime$log2FoldChange)>1, ifelse(restime$log2FoldChange>1, 'Up', 'Down'), '')
+restime$gene_group = ifelse(rownames(restime) %in% c(DHT_up_not_FLU, DHT_up_FLU), 'DHT up', ifelse(rownames(restime) %in% c(DHT_down_not_FLU, DHT_down_FLU), 'DHT down', 'DHT invariant'))
+time_2plot = data.frame(restime)
+table(time_2plot[,c('cutoff','gene_group')])
+pal <- c("firebrick3", "dodgerblue3", "black")
+pal <- setNames(pal, c("Up", "Down", ""))
+fig = plot_ly(data = data.frame(resdht), x = ~log2FoldChange, y = ~logpadj, color = ~cutoff, colors=pal)
+fig <- fig%>% layout(
+                   xaxis = list(range = list(-10,10)),
+                   yaxis = list(
+                     range = list(0,30)))
+
+fig
+orca(add_surface(fig),'test.pdf')
+```
+### venn
+```{r venn, message=FALSE}
+library(eulerr)
+dht.cnt.up = resdht[resdht$padj<0.05 & resdht$log2FoldChange>1,]
+dht.cnt.down = resdht[resdht$padj<0.05 & resdht$log2FoldChange< (-1),]
+dht.cnt <- read.csv('DEGs/DHT_vs_CNT_1218DEGs.csv')
+dht.cnt.up = dht.cnt[dht.cnt$padj<0.05 & dht.cnt$log2FoldChange>1,]
+dht.cnt.down = dht.cnt[dht.cnt$padj<0.05 & dht.cnt$log2FoldChange< (-1),]
+degs.up = list(dht.flu.up=rownames(dht.flu.up), dht.cnt.up=dht.cnt.up$X)
+degs.down <- list(dht.flu.down=rownames(dht.flu.down), dht.cnt.down=dht.cnt.down$X)
+pdf('DEGs/overlap_down.pdf', family="ArialMT")
+plot(euler(degs.down, shape = "ellipse"), quantities = TRUE)
+dev.off()
+plot(venn(degs, simplify=TRUE, show.plot=T))
+
+DHT_up_not_FLU = dht.cnt.up$X[(!dht.cnt.up$X %in% rownames(dht.flu.up)) | (!rownames(dht.flu.up) %in% dht.cnt.up$X)]
+write.csv(DHT_up_not_FLU, 'DEGs/DHT_up_CNTor_FLU.tsv', sep='\t', quote = F, row.names = F)
+
+DHT_down_not_FLU = dht.cnt.down$X[(!dht.cnt.down$X %in% rownames(dht.flu.down)) | (!rownames(dht.flu.down) %in% dht.cnt.down$X)]
+write.csv(DHT_down_not_FLU, 'DEGs/DHT_down_CNTor_FLU.tsv', sep='\t', quote = F, row.names = F)
+
+DHT_up_FLU = dht.cnt.up$X[dht.cnt.up$X %in% rownames(dht.flu.up)]
+write.csv(DHT_up_FLU, 'DEGs/DHT_up_FLU.tsv', sep='\t', quote = F, row.names = F)
+
+DHT_down_FLU = dht.cnt.down$X[dht.cnt.down$X %in% rownames(dht.flu.down)]
+write.csv(DHT_down_FLU, 'DEGs/DHT_down_FLU.tsv', sep='\t', quote = F, row.names = F)
+```
+
+## normalization
+```{r}
+dds.e10.filter <- estimateSizeFactors(dds.pgc.nooutlier)
+#sizeFactors(dds)
+normalized_counts <- counts(dds.e10.filter, normalized = TRUE)
+lognormalized_counts <- log(normalized_counts + 1, 2)
+ln.counts <- as.data.frame(lognormalized_counts)
+ln.counts$genes <- rownames(ln.counts)
+data_risk = ln.counts[c(
+  'Ar',
+  'Fshr',
+  'Fto',
+  'Capn10',
+  'Cypa1a',
+  'Cyp11a1',
+  'Cyp17a1',
+  'Cyp1a1',
+  'Cyp21a2',
+  'Cyp3a7',
+  'Cyp19a1'
+),]
+data_dlk1 = ln.counts[c('Tubb1', 'Itga2b'),]
+data_risk <- na.omit(data_risk)
+data_dlk1 <- na.omit(data_dlk1)
+resLong <- reshape(
+  data_risk,
+  varying = colnames(ln.counts)[1:22],
+  direction = "long",
+  idvar = c("genes"),
+  v.names = "expression"
+)
+resLong <- reshape(
+  data_dlk1,
+  varying = colnames(ln.counts)[1:9],
+  direction = "long",
+  idvar = c("genes"),
+  v.names = "expression"
+)
+n_genes = 2
+resLong$condition = rep(dds.pgc.nooutlier$condition, n_genes)
+write.table(
+  resLong,
+  file = "Risk_table.txt",
+  append = FALSE,
+  quote = FALSE,
+  sep = "\t",
+  eol = "\n",
+  na = "NA",
+  dec = ".",
+  row.names = FALSE,
+  col.names = TRUE
+)
+write.table(
+  resLong,
+  file = "PGC_table.txt",
+  append = FALSE,
+  quote = FALSE,
+  sep = "\t",
+  eol = "\n",
+  na = "NA",
+  dec = ".",
+  row.names = FALSE,
+  col.names = TRUE
+)
+resLong[order(resLong$id),]
+data_long <- tidyr::gather(data_risk, measurement, factor_key = TRUE)
+
+data_long <-
+  tidyr::gather(ln.counts, dds.e10$condition, measurement, factor_key = TRUE)
+
+data_long$treatment <- colData(dds.nooutlier)$condition
+data_long$time <- colData(dds.nooutlier)$time
+data_long$gene_group <- NULL
+data1 <- ln.counts[ln.counts$genes %in% rownames(dht.cnt.up), ]
+data1$gene_group <- 'DHT>CNT'
+data2 <- ln.counts[ln.counts$genes %in% rownames(dht.cnt.down), ]
+data2$gene_group <- 'DHT<CNT'
+# data2 <- data_long[data_long$genes %in% DHT_down_not_FLU,]
+# data2$gene_group <- 'DHT<CNT xor DHT<FLU'
+
+# data3 <- data_long[data_long$genes %in% DHT_up_FLU,]
+# data3$gene_group <- 'DHT>CNT and DHT>FLU'
+
+# data4 <- data_long[data_long$genes %in% DHT_up_FLU,]
+# data4$gene_group <- 'DHT<CNT and DHT<FLU'
+
+data_all <- rbind(data1, data2)
+head(data.all)
+data1 <- ln.counts[ln.counts$genes %in% DHT_up_not_FLU, ]
+
+data2 <- ln.counts[ln.counts$genes %in% DHT_down_not_FLU, ]
+
+data3 <- ln.counts[ln.counts$genes %in% DHT_up_FLU, ]
+
+data4 <- ln.counts[ln.counts$genes %in% DHT_down_FLU, ]
+data_all <- rbind(data1, data2, data3, data4)
+library(grDevices)
+library(circlize)
+col_fun = colorRamp2(c(-1, 0, 1), c("skyblue3", "black", "yellow"))
+data_all_heatmap = data_all[, !grepl('genes|gene_group', colnames(data_all))]
+rownames(data_all_heatmap) = NULL
+colnames(data_all_heatmap) = NULL
+zscore <- function(x) {
+  z <- (x - mean(x)) / sd(x)
+  return(z)
+}
+data_all_zscore <- zscore(as.matrix(data_all_heatmap))
+coldata = colData(dds.e10.filter)[with(colData(dds.e10.filter), order(condition, gender)),]
+column_ha = HeatmapAnnotation(condtion = coldata$condition,
+                              sex = coldata$gender)
+
+data_all_zscore_sort = data_all_zscore[
+  ,with(colData(dds.e10.filter), order(condition, gender))
+]
+pdf('DEGs/gene_groups_heatmap_placenta_DHT_CNT.pdf', family = 'ArialMT')
+Heatmap(
+  data_all_zscore_sort,
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  bottom_annotation = column_ha,
+  row_split = rep(c('DHT>CNT', 'DHT<CNT'), c(nrow(data1), nrow(data2))),
+  row_title_rot = 0,
+  row_gap = unit(5, "mm")
+)
+dev.off()
+```
+## boxplot
+```{python}
+plt.figure(1)
+ax = sns.barplot(x="genes", y="expression", hue="condition", data=r.resLong)
+plt.savefig('figures/risk_bars.pdf', bbox_inches='tight')
+
+g = sns.catplot(x='treatment', y='measurement', hue='time', col='gene_group', data=r.data_all, kind='box')
+plt.savefig('DEGs/gene_groups_placenta.pdf', bbox_inches='tight')
+
+data_heatmap = r.data_all.iloc[:,0:-1]
+data_heatmap.columns = r.condition
+plt.figure(1)
+sns.heatmap(data_heatmap,cmap='coolwarm')
+plt.savefig('DEGs/gene_heatmap_placenta.pdf', bbox_inches='tight')
+plt.figure(9)
+sns.relplot(
+    data=r.time_2plot, x="log2FoldChange", y="logpadj",
+    col="gene_group", hue="cutoff", size=1, linewidth=0,
+    kind="scatter", palette = [sns.color_palette('tab10')[7], sns.color_palette('tab10')[3], sns.color_palette('tab10')[0]]
+)
+plt.savefig('DEGs/time_vocano_placenta.pdf', bbox_inches='tight')
+plt.figure(13)
+sns.boxplot(x="time", y="measurement", hue="treatment", data=r.data_long)
+plt.savefig('DEGs/CYP19A1_placenta_box.pdf', bbox_inches='tight')
+```
+## correlation
+```{r corr}
+ln.data = ln.counts[,!grepl('genes|gene_group', colnames(data_all))]
+ln.cnt = ln.counts[,dds.e10$condition=='CNT']
+ln.flu = ln.counts[,dds.e10$condition=='FLU']
+cormat <- round(cor(ln.data, method = 'spearman'),2)
+library(reshape2)
+melted_cormat <- melt(cormat)
+library(ggplot2)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) +
+ scale_fill_gradient2(low = "blue", high = "red", mid='white',
+   midpoint = 0.85, limit = c(0.8,0.9), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  geom_tile()
+```

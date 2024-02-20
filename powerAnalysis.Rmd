@@ -1,0 +1,38 @@
+---
+title: "DEG power analysis"
+author: "Hong Jiang"
+date: "06/02/2024"
+output:
+   html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(warning=FALSE, message=FALSE) 
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))
+```
+```{r libraries, include=FALSE}
+library(PROPER)
+```
+Use parameters from mating project to simulate and caculate power of DEG analysis
+```{r parameters}
+# parameters
+sim.opts.Bottomly <- RNAseq.SimOptions.2grp(
+    ngenes = 20000, p.DE = 0.05,
+    lOD = "bottomly", lBaselineExpr = "bottomly"
+)
+simres <- runSims(
+    Nreps = c(2, 4, 6, 8, 10, 12), sim.opts = sim.opts.Bottomly,
+    DEmethod = "DESeq2", nsims = 20
+)
+powers <- comparePower(simres,
+    alpha.type = "fdr", alpha.nominal = 0.05,
+    stratify.by = "expr", delta = 1
+)
+summaryPower(powers)
+pdf('power.pdf', width=6, height=4)
+plotPower(powers)
+dev.off()
+```

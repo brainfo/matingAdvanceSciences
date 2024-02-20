@@ -1,0 +1,151 @@
+---
+title: "second day"
+author: "Hong Jiang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    fig_caption: yes
+    theme:
+      bootswatch: sandstone
+      base_font:
+        "Arial"
+      code_font:
+        google: "JetBrains Mono"
+      progress-bar-bg: "orange"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+```{r library, include=F}
+#.libPaths(c("/mnt/data/hong/anaconda3/lib/R/library"))
+library(DESeq2)
+library(stringr)
+library(dplyr)
+library(plotly)
+library(reticulate)
+library(tidyr)
+library(ComplexHeatmap)
+library(ggplot2)
+library(EnhancedVolcano)
+# use_python('/mnt/data/hong/anaconda3/bin/python')
+# options(reticulate.conda_binary = '/mnt/data/hong/anaconda3/bin/conda')
+# use_condaenv('base')
+#knitr::knit_engines$set(python = reticulate::eng_python)
+```
+## make dataset
+```{r dataset}
+data = read.table(file = 'counts_placentanew.txt', sep = '\t', quote = "", header = T)
+data_distinct = data %>% distinct(gene_0me, .keep_all = T)
+## duplicate gene names, why?
+rownames(data_distinct) = data_distinct$gene_0me
+data_distinct$gene_0me = NULL
+sample.index = colnames(data_distinct)
+condition = factor(substr(sample.index, start = 1, stop = 3))
+time = factor(str_extract(sample.index, '(\\d+\\.\\d+)'))
+gender = factor(substr(sample.index, 4, 4))
+tissue = factor(rep('placenta', length(sample.index)))
+samples = data.frame(condition = condition, time = time, gender = gender, sample = sample.index, row.names = sample.index, tissue=tissue)
+
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = as.matrix(data_distinct),
+                              colData = samples,
+                              design = ~ condition)
+
+dds.e10 <- dds[, dds$time!=13.5]
+```
+## QC
+numbers of genes detected:
+```{r qc}
+detected = colSums(counts(dds.e10)>0)
+boxplot(detected , width=0.01)
+detected
+```
+## preprocess
+### filtering genes
+```{r filter}
+sprintf('original gene number: %s; original sample number: %s', nrow(dds.e10), ncol(dds.e10))
+keep <- rowSums(counts(dds.e10)>0) >= 10
+dds.filter <- dds.e10[keep,]
+sprintf('gene number after filtering: %s; original sample number: %s', nrow(dds.filter), ncol(dds.filter))
+```
+
+
+### Heatmap and PCA
+```{r plots}
+embryo_info <- read.csv('samples/sample_info.txt', sep='\t')
+## samples with annotation
+dds.annotation <- dds.filter[,colnames(dds.filter) %in% embryo_info$Samples]
+embryo_info <- embryo_info[embryo_info$Samples %in% colnames(dds.filter),]
+dds.annotation.vst <- vst(dds.annotation)
+
+sampleCors <- cor(log_, method = 'spearman')
+rownames(embryo_info) <- embryo_info$Samples
+column_ha = HeatmapAnnotation(time = colData(dds.annotation)$time, condition = colData(dds.annotation)$condition)
+row_ha = rowAnnotation(placenta = embryo_info$Placenta.diameter, CRL = embryo_info$CRL, embryo = embryo_info$Embryo)
+library(circlize)
+col_fun = colorRamp2(c(0.6, 0.8, 1), c("blue", "white", "orange"))
+#pdf('logexp_corr.pdf')
+Heatmap(sampleCors, name = "Corr", top_annotation = column_ha, right_annotation = row_ha, cluster_rows = T, cluster_columns = T, col=col_fun)
+#dev.off()
+#log_dds_e10 <- log1p(fpm(dds.e10.filter))
+log_dds_e10_pca <- prcomp(t(log_))
+log_dds_e10_pca.proportionvariances <- ((log_dds_e10_pca$sdev^2) / (sum(log_dds_e10_pca$sdev^2)))*100
+color = factor(dds.annotation$condition, levels=c('CNT', 'DHT', 'FLU'), labels=c('black', '#00B3B3', '#9DFFFF'))
+symbol = as.numeric(factor(dds.annotation$gender, levels=c('M', 'F'), labels=c(21, 22)))
+require(scatterplot3d)
+#pdf('figures/pca3d_E10_placenta.pdf')
+par(mar=c(4,4,4,4), cex=1.0, cex.main=0.8, cex.axis=0.8)
+
+scatterplot3d(log_dds_e10_pca$x[,1:3], angle=-40, main="", color=color, pch=symbol, xlab=paste("PC1, ", round(log_dds_e10_pca.proportionvariances[1], 2), "%"), ylab=paste("PC2, ", round(log_dds_e10_pca.proportionvariances[2], 2), "%"), zlab=paste("PC3, ", round(log_dds_e10_pca.proportionvariances[3], 2), "%"), grid=FALSE, box=FALSE, ylim = c(-40, 60), lwd=.5)
+source('http://www.sthda.com/sthda/RDoc/functions/addgrids3d.r')
+addgrids3d(log_dds_e10_pca$x[,1:3], grid = c("xy", "xz", "yz"))
+#dev.off()
+# 
+# source('http://www.sthda.com/sthda/RDoc/functions/addgrids3d.r')
+# addgrids3d(log_dds_e10_pca$x[,1:3], grid = c("xy", "xz", "yz"))
+
+vsd <- vst(dds.filter, blind=FALSE)
+
+sampleDists <- cor(assay(vsd), method = 'pearson')
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(vsd)
+colnames(sampleDistMatrix) <- NULL
+breaksList = seq(0.9, 1, by = 0.001)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+library(pheatmap)
+pheatmap(sampleDistMatrix,
+         col=colors,
+         main = 'Euclidean Distance of vst normalized counts')
+```
+## filter samples
+```{r sample-clean, message=FALSE}
+dds.nooutlier <- dds[, !grepl('FLUM2_10.5|FLUF2_13.5|CNTF2_10.5|DHTF1_10.5',colnames(dds.e10))]
+```
+## run DESeq2
+```{r DESeq, message=FALSE}
+dds.e10.filter <- DESeq(dds.nooutlier)
+```
+## postprocess
+### vocano plot
+```{r lfcsgrink, message=FALSE}
+resultsNames(dds.e10.filter)
+resdht = lfcShrink(dds.e10.filter, coef="condition_DHT_vs_CNT", type='apeglm')
+EnhancedVolcano(resdht,
+    lab = paste0("italic('", rownames(resdht), "')"),
+    x = 'log2FoldChange',
+    drawConnectors = TRUE,
+    y = 'padj',
+    parseLabels = TRUE)+ theme_classic()
+
+## expression across sex and conditions
+```
+

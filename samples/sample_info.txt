@@ -1,0 +1,31 @@
+Samples	Placenta diameter	CRL	Placenta	Embryo
+CNTF1_10.5	3.36	2.93	2 broken	
+CNTM1_10.5	3.12	2.98	2 broken	1 Vshaped
+CNTM2_10.5				? 
+CNTM3_10.5	3.93	3.2		
+CNTF3_10.5	3.47	2.95		
+CNTM4_10.5	3.97	2.92		
+DHTF2_10.5	4.07	1.53		
+DHTM1_10.5	3.63	1.84		
+DHTF3_10.5				aborted
+DHTM2_10.5	5.04			Vshaped
+DHTF4_10.5				aborted
+DHTM3_10.5	4.55	2.12		
+DHTF5_10.5	4.56	1.4		
+DHTF6_10.5	3.45	1.23		
+DHTF7_10.5				aborted
+DHTF8_10.5				Vshaped
+FLUF1_10.5	3.33	2.52		
+FLUM1_10.5	2.52	3.48		
+FLUF2_10.5	3.35	2.99		
+FLUF3_10.5	2.66	2.49		
+CNTF1_13.5	6.61	8.4		
+CNTM1_13.5	6.52	8.67		
+CNTF2_13.5				technical issue
+CNTF3_13.5	6.55	9.35		
+CNTM2_13.5	6.31	9.56		
+FLUF1_13.5	6.91	8.91		
+FLUM1_13.5	7.12	9.13		
+FLUF1_13.5.1 	7.12	9.13		
+FLUM3_13.5	5.66	7.01		
+FLUM2_13.5	7.41	8.52		

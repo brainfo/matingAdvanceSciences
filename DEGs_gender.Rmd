@@ -1,0 +1,199 @@
+---
+title: "DEGs_gender"
+author: "hong"
+date: '2022-08-22'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_chunk$set(warning=FALSE, message=FALSE) 
+```
+```{r library, include=F}
+library(DESeq2)
+library(stringr)
+library(dplyr)
+library(plotly)
+library(reticulate)
+library(tidyr)
+library(ComplexHeatmap)
+library(ggplot2)
+use_python('/mnt/data/hong/anaconda3/bin/python')
+options(reticulate.conda_binary = '/mnt/data/hong/anaconda3/bin/conda')
+use_condaenv('base')
+library(colormap)
+#knitr::knit_engines$set(python = reticulate::eng_python)
+```
+```{r dataset}
+data = read.table(file = '../counts_placentanew.txt', sep = '\t', quote = "", header = T)
+data_distinct = data %>% distinct(gene_0me, .keep_all = T)
+## duplicate gene names, why?
+rownames(data_distinct) = data_distinct$gene_0me
+data_distinct$gene_0me = NULL
+sample.index = colnames(data_distinct)
+condition = factor(substr(sample.index, start = 1, stop = 3))
+time = factor(str_extract(sample.index, '(\\d+\\.\\d+)'))
+gender = factor(substr(sample.index, 4, 4))
+tissue = factor(rep('placenta', length(sample.index)))
+samples = data.frame(condition = condition, time = time, gender = gender, sample = sample.index, row.names = sample.index, tissue=tissue)
+
+## since no DHT at 13.5
+dds <- DESeqDataSetFromMatrix(countData = as.matrix(data_distinct),
+                              colData = samples,
+                              design = ~ condition)
+dds.nooutlier <- dds[, !grepl('FLUM2_10.5|FLUF2_13.5',colnames(dds))]
+dds.e10 <- dds.nooutlier[, dds.nooutlier$time!=13.5]
+```
+```{r data}
+f = read.csv(file = 'DHT_vs_CNT_female_DEGs.csv', header = T)
+m = read.csv(file = 'DHT_vs_CNT_male_DEGs.csv', header = T)
+```
+
+```{r venn, message=FALSE}
+library(eulerr)
+f_sig = dplyr::filter(f, abs(log2FoldChange)>1)
+m_sig = dplyr::filter(m, abs(log2FoldChange)>1)
+genders <- list(female=f_sig$X, male=m_sig$X)
+pdf('figures/overlap_gender.pdf', family="ArialMT")
+plot(euler(genders, shape = "ellipse"), 
+     fills = c('magenta4', 'chocolate1'),
+     quantities = TRUE)
+dev.off()
+```
+```{r fc, message=FALSE}
+sig = merge(f_sig[,c('X', 'log2FoldChange', 'padj')], m_sig[,c('X', 'log2FoldChange', 'padj')], by='X')
+sig_logp <- merge_df_sig %>% mutate(minus_log_p_f=-log10(padj.x), minus_log_p_m = -log10(padj.y))
+write.table(filter(sig, log2FoldChange.x<(-1) & log2FoldChange.y<(-1))$X, 'gender_common_down.genes', quote = F, row.names = F)
+```
+```{r}
+dds.e10 <- estimateSizeFactors(dds.e10)
+#sizeFactors(dds)
+normalized_counts <- counts(dds.e10, normalized=TRUE)
+lognormalized_counts <- log(normalized_counts+1, 2)
+ln.counts <- as.data.frame(lognormalized_counts)
+ln.counts$genes <- rownames(ln.counts)
+
+data1 <- ln.counts[setdiff(f_sig$X, m_sig$X),]
+data1$gene_group <- 'DEGs of placenta with female fetus'
+data2 <- ln.counts[intersect(f_sig$X, m_sig$X),]
+data2$gene_group <- 'DEGs of placenta with both genders'
+data3 <- ln.counts[setdiff(m_sig$X, f_sig$X),]
+data3$gene_group <- 'DEGs of placenta with male fetus'
+
+f_only <- dplyr::filter(f, X%in% setdiff(f_sig$X, m_sig$X) & log2FoldChange>1)
+f_only_down <- dplyr::filter(f, X%in% setdiff(f_sig$X, m_sig$X) & log2FoldChange< (-1))
+data_all <- rbind(data1, data2, data3)
+
+write.table(f_only, 'female_only_up_genes.tsv', sep='\t')
+write.table(f_only_down, 'female_only_down_genes.tsv', sep='\t')
+
+library(grDevices)
+library(circlize)
+col_fun = colorRamp2(c(-2, 0, 2), c("skyblue3", "black", "yellow"))
+data_all_heatmap = data_all[,!grepl('genes|gene_group', colnames(data_all))]
+data_all_heatmap=data_all_heatmap[,order( colData(dds.e10)$condition, colData(dds.e10)$gender)]
+rownames(data_all_heatmap) = NULL
+colnames(data_all_heatmap) = NULL
+zscore<- function(x){
+    z<- (x - mean(x)) / sd(x)
+    return(z)
+}
+data_all_zscore <- apply(as.matrix(data_all_heatmap), 1, zscore)
+mat_zscore <- t(scale(t(as.matrix(data_all_heatmap))))
+data_all_zscore <- zscore(as.matrix(data_all_heatmap))
+column_ha = HeatmapAnnotation(condtion = colData(dds.e10)$condition[order(colData(dds.e10)$condition, colData(dds.e10)$gender)], gender= colData(dds.e10)$gender[order( colData(dds.e10)$condition, colData(dds.e10)$gender)])
+pdf('figures/gender_heatmap_placenta_DHT_CNT_black.pdf', family='ArialMT')
+Heatmap(mat_zscore, col=col_fun, cluster_rows = T, cluster_columns = FALSE, bottom_annotation=column_ha, 
+        row_split = rep(c('DEGs of placenta with female fetus', 'DEGs of placenta with both genders', 'DEGs of placenta with male fetus'), c(nrow(data1), nrow(data2), nrow(data3))), row_title_rot = 0,
+        row_gap = unit(5, "mm"), show_row_dend=F)
+dev.off()
+```
+```{r dye}
+dds.nooutlier <- estimateSizeFactors(dds.nooutlier)
+#sizeFactors(dds)
+normalized_counts <- counts(dds.nooutlier, normalized=TRUE)
+lognormalized_counts <- log(normalized_counts+1, 2)
+ln.counts <- as.data.frame(lognormalized_counts)
+ln.counts$genes <- rownames(ln.counts)
+
+data1 <- ln.counts[setdiff(f_sig$X, m_sig$X),]
+data1$gene_group <- 'DEGs of placenta with female fetus'
+data2 <- ln.counts[intersect(f_sig$X, m_sig$X),]
+data2$gene_group <- 'DEGs of placenta with both genders'
+data3 <- ln.counts[setdiff(m_sig$X, f_sig$X),]
+data3$gene_group <- 'DEGs of placenta with male fetus'
+
+f_only <- dplyr::filter(f, X%in% setdiff(f_sig$X, m_sig$X) & log2FoldChange>1)
+f_only_down <- dplyr::filter(f, X%in% setdiff(f_sig$X, m_sig$X) & log2FoldChange< (-1))
+data_all <- rbind(data1, data2, data3)
+
+write.table(f_only, 'female_only_up_genes.tsv', sep='\t')
+write.table(f_only_down, 'female_only_down_genes.tsv', sep='\t')
+
+library(grDevices)
+library(circlize)
+col_fun = colorRamp2(c(-2, 0, 2), c("skyblue3", "black", "yellow"))
+data_all_heatmap = data_all[,!grepl('genes|gene_group', colnames(data_all))]
+data_all_heatmap=data_all_heatmap[,order( colData(dds.e10)$condition, colData(dds.e10)$gender)]
+rownames(data_all_heatmap) = NULL
+colnames(data_all_heatmap) = NULL
+zscore<- function(x){
+    z<- (x - mean(x)) / sd(x)
+    return(z)
+}
+data_all_zscore <- apply(as.matrix(data_all_heatmap), 1, zscore)
+mat_zscore <- t(scale(t(as.matrix(data_all_heatmap))))
+data_all_zscore <- zscore(as.matrix(data_all_heatmap))
+column_ha = HeatmapAnnotation(condtion = colData(dds.e10)$condition[order(colData(dds.e10)$condition, colData(dds.e10)$gender)], gender= colData(dds.e10)$gender[order( colData(dds.e10)$condition, colData(dds.e10)$gender)])
+pdf('figures/gender_heatmap_placenta_DHT_CNT_black.pdf', family='ArialMT')
+Heatmap(mat_zscore, col=col_fun, cluster_rows = T, cluster_columns = FALSE, bottom_annotation=column_ha, 
+        row_split = rep(c('DEGs of placenta with female fetus', 'DEGs of placenta with both genders', 'DEGs of placenta with male fetus'), c(nrow(data1), nrow(data2), nrow(data3))), row_title_rot = 0,
+        row_gap = unit(5, "mm"), show_row_dend=F)
+dev.off()
+```
+```{python}
+#import matplotlib.pyplot as plt
+#import numpy as np
+
+fig, ax = plt.subplots()
+ax.set_aspect("equal")
+
+x = [1,1,2,2,3,3] # xdata
+y = [1,2,3,1,2,3] # ydata
+p1 = r.sig_logp['minus_log_p_f'] # parameter 1
+p2 = r.sig_logp['minus_log_p_m'] # parameter 2
+
+p11 = np.where(p1<2, p1, 2)/2
+p21 = np.where(p2<2, p2, 2)/2
+# create a very simple colormap, 
+#  mapping parameter 1 to the red channel and 
+#          parameter 2 to the blue channel
+c_ = np.array((p11, np.zeros(len(p11)), p21 ), dtype=float).T
+
+# put shapes at positions (x[i], y[i]) and colorize them with our
+# cmap according to their respective parameters
+plt.scatter(r.sig_logp['log2FoldChange.x'], r.sig_logp['log2FoldChange.y'], c=c_, alpha=.5)
+
+ax.set_xlim(-10,10)
+ax.set_ylim(-10,10)
+ax.set_xlabel("log2FC female")
+ax.set_ylabel("log2FC male")
+
+# create the legend:
+
+plt.subplots_adjust(left=0.1, right=0.65, top=0.85)
+cax = fig.add_axes([0.7,0.55,0.3,0.3])
+cp1 = np.linspace(0,1)
+cp2 = np.linspace(0,1)
+Cp1, Cp2 = np.meshgrid(cp1,cp2)
+C0 = np.zeros_like(Cp1)
+# make RGB image, p1 to red channel, p2 to blue channel
+Legend = np.dstack((Cp1, C0, Cp2))
+# parameters range between 0 and 1
+cax.imshow(Legend, origin="lower", extent=[0,1,0,1])
+cax.set_xlabel("-log(p.adj) female")
+cax.set_ylabel("-log(p.adj) male")
+cax.set_title("2D cmap legend", fontsize=10)
+
+plt.show()
+```
